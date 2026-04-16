@@ -1,0 +1,67 @@
+name: PR Metrics Dashboard
+on:
+  pull_request:
+    types: [closed]
+  workflow_dispatch:
+permissions:
+  contents: write
+  pull-requests: read
+jobs:
+  metrics:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compute metrics dashboard
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          gh api "repos/${REPO}/pulls?state=closed&per_page=100" --jq '[.[]|select(.merged_at!=null)]' > prs.json
+          TOTAL=$(jq length prs.json)
+          jq -r '.[]|(.merged_at|strptime("%Y-%m-%dT%H:%M:%SZ")|mktime)-(.created_at|strptime("%Y-%m-%dT%H:%M:%SZ")|mktime)' prs.json|sort -n > ct.txt
+          COUNT=$(wc -l < ct.txt|tr -d ' ')
+          if [ "$COUNT" -gt 0 ]; then
+            MI=$(((COUNT-1)/2))
+            PI=$(python3 -c "import math;print(min(int(math.ceil(${COUNT}*0.85))-1,${COUNT}-1))")
+            MEDIAN=$(python3 -c "print(round($(sed -n '$((MI+1))p' ct.txt)/60,1))")
+            P85=$(python3 -c "print(round($(sed -n '$((PI+1))p' ct.txt)/60,1))")
+          else
+            MEDIAN=n/a
+            P85=n/a
+          fi
+          REVIEWED=0
+          UNREV=""
+          ROWS=""
+          TI=0
+          while IFS= read -r n; do
+            A=$(jq -r --argjson n "$n" '.[]|select(.number==$n)|.user.login' prs.json)
+            T=$(jq -r --argjson n "$n" '.[]|select(.number==$n)|.title' prs.json)
+            R=$(gh api "repos/${REPO}/pulls/${n}/reviews" --jq "[.[]|select(.user.login!="${A}" and .state!="COMMENTED")]|length")
+            C=$(gh api "repos/${REPO}/pulls/${n}/commits" --jq length)
+            I=$(python3 -c "print(max(1,${C}-1))")
+            TI=$((TI+I))
+            ROWS="${ROWS}| #${n} | ${T} | ${I} |\n"
+            [ "$R" -gt 0 ] && REVIEWED=$((REVIEWED+1)) || UNREV="${UNREV}\n- #${n}: ${T}"
+          done < <(jq -r '.[].number' prs.json)
+          [ "$TOTAL" -gt 0 ] && RATE=$(python3 -c "print(f'{round(${REVIEWED}/${TOTAL}*100,1)}%')") || RATE=n/a
+          [ "$TOTAL" -gt 0 ] && AVG=$(python3 -c "print(round(${TI}/${TOTAL},1))") || AVG=n/a
+          SINCE=$(date -u -d '28 days ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null||date -u -v-28d +%Y-%m-%dT%H:%M:%SZ)
+          gh api "repos/${REPO}/commits?sha=main&per_page=100&since=${SINCE}" --jq '.[]|{a:(.author.login//.commit.author.name),d:.commit.author.date}' > rc.json
+          SR=X
+          [ "$REVIEWED" -eq "$TOTAL" ] 2>/dev/null && SR=OK || true
+          [ "$RATE" = n/a ] && SR=SOLO
+          TS=$(date -u +"%Y-%m-%d %H:%M UTC")
+          mkdir -p docs
+          echo 'aW1wb3J0IGpzb24sb3MKZnJvbSBjb2xsZWN0aW9ucyBpbXBvcnQgZGVmYXVsdGRpY3QKZnJvbSBkYXRldGltZSBpbXBvcnQgZGF0ZXRpbWUKdHJ5OgogICAgcmM9W2pzb24ubG9hZHMobCkgZm9yIGwgaW4gb3BlbigncmMuanNvbicpIGlmIGwuc3RyaXAoKV0KZXhjZXB0OgogICAgcmM9W10Kdz1kZWZhdWx0ZGljdChsYW1iZGE6ZGVmYXVsdGRpY3QoaW50KSkKZm9yIGMgaW4gcmM6CiAgICBkdD1kYXRldGltZS5zdHJwdGltZShjWydkJ10sJyVZLSVtLSVkVCVIOiVNOiVTWicpCiAgICB3W2NbJ2EnXV1bZHQuc3RyZnRpbWUoJyVZLVclVicpXSs9MQppZiB3OgogICAgZnJlcT0nfCBBdXRob3IgfCBXZWVrIHwgQ29tbWl0cyB8XG58LS0tfC0tLXwtLS18XG4nKydcbicuam9pbihmJ3wge2F9IHwge3drfSB8IHtjbnR9IHwnIGZvciBhLHdlZWtzIGluIHNvcnRlZCh3Lml0ZW1zKCkpIGZvciB3ayxjbnQgaW4gc29ydGVkKHdlZWtzLml0ZW1zKCkpKQplbHNlOgogICAgZnJlcT0nfCBBdXRob3IgfCBXZWVrIHwgQ29tbWl0cyB8XG58LS0tfC0tLXwtLS18XG58IC0gfCAtIHwgbm8gZGF0YSB8Jwp1bnJldj1vcy5lbnZpcm9uLmdldCgnVU5SRVYnLCcnKS5yZXBsYWNlKCdcXG4nLCdcbicpLnN0cmlwKCkgb3IgY2hyKDk5ODkpKycgTm9uZScKcm93cz1vcy5lbnZpcm9uLmdldCgnUk9XUycsJycpLnJlcGxhY2UoJ1xcbicsJ1xuJykuc3RyaXAoKQptZD1mIiIiIyBFbmdpbmVlcmluZyBGbG93IE1ldHJpY3MgRGFzaGJvYXJkCj4gVXBkYXRlZDoge29zLmVudmlyb24uZ2V0KCdUUycsJycpfSB8IHtvcy5lbnZpcm9uLmdldCgnVE9UQUwnLCcnKX0gUFJzCi0tLQojIyBTdW1tYXJ5CnwgTWV0cmljIHwgVmFsdWUgfAp8LS0tfC0tLXwKfCBDeWNsZSBUaW1lIE1lZGlhbiB8IHtvcy5lbnZpcm9uLmdldCgnTUVESUFOJywnJyl9IG1pbiB8CnwgQ3ljbGUgVGltZSBwODUgfCB7b3MuZW52aXJvbi5nZXQoJ1A4NScsJycpfSBtaW4gfAp8IFJldmlldyBQYXJ0aWNpcGF0aW9uIHwge29zLmVudmlyb24uZ2V0KCdSQVRFJywnJyl9IHwKfCBQUiBJdGVyYXRpb24gQXZnIHwge29zLmVudmlyb24uZ2V0KCdBVkcnLCcnKX0gfAotLS0KIyMgMS4gUFIgQ3ljbGUgVGltZQpNZWRpYW4gKip7b3MuZW52aXJvbi5nZXQoJ01FRElBTicsJycpfSBtaW4qKiBwODUgKip7b3MuZW52aXJvbi5nZXQoJ1A4NScsJycpfSBtaW4qKgo+IE1lZGlhbj42MG1pbiB3YXRjaC4gPjQ4MG1pbiBhY3QuCi0tLQojIyAyLiBSZXZpZXcgUGFydGljaXBhdGlvbjoge29zLmVudmlyb24uZ2V0KCdSQVRFJywnJyl9Cnt1bnJldn0KPiAxMDAlIHRhcmdldC4gU29sbyByZXBvPTAlIHVudGlsIGNvbGxhYm9yYXRvcnMgam9pbi4KLS0tCiMjIDMuIEl0ZXJhdGlvbiBDb3VudCBhdmcge29zLmVudmlyb24uZ2V0KCdBVkcnLCcnKX0KfCBQUiB8IFRpdGxlIHwgSXRlcmF0aW9ucyB8CnwtLS18LS0tfC0tLXwKe3Jvd3N9Cj4gQXZnPjMgc2lnbmFscyBzcGVjIGFtYmlndWl0eS4KLS0tCiMjIDQuIENvbW1pdCBGcmVxdWVuY3kgKDI4ZCkKe2ZyZXF9Cj4gRHJvcD1ibG9ja2VyIHNpZ25hbC4gTm90IHByb2R1Y3Rpdml0eSBtZWFzdXJlLgotLS0KKkdlbmVyYXRlZCBieSBwci1tZXRyaWNzLnltbCoiIiIKb3BlbignZG9jcy9wci1tZXRyaWNzLm1kJywndycpLndyaXRlKG1kKQpwcmludCgnZG9uZScpCg==' | base64 -d > make_dashboard.py
+          SR="$SR" TS="$TS" MEDIAN="$MEDIAN" P85="$P85" RATE="$RATE" AVG="$AVG" TOTAL="$TOTAL" REVIEWED="$REVIEWED" UNREV="$UNREV" ROWS="$ROWS" python3 make_dashboard.py
+          cat docs/pr-metrics.md
+      - name: Commit dashboard
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add docs/pr-metrics.md
+          git diff --cached --quiet && exit 0
+          git commit -m "chore: update PR metrics dashboard [skip ci]"
+          git push origin HEAD:main
