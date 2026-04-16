@@ -27,3 +27,12 @@ A simple Hello World web page published via GitHub Pages
         - ## Live Site
        
         - `https://nishamunshi-ops.github.io/hello-world/`
+
+
+## Contributing
+
+This is a personal learning repo. PRs and Issues are welcome for educational discussion.
+
+## License
+
+MIT
